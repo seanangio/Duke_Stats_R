@@ -1,0 +1,1531 @@
+---
+title: "Modeling and Prediction for Movies"
+date: 2017-10-13
+output: 
+  html_document: 
+    fig_height: 4
+    highlight: pygments
+    keep_md: yes
+    theme: spacelab
+---
+
+## Setup
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(cache=TRUE)
+```
+### Load packages
+
+```{r load-packages, message = FALSE}
+library(statsr)
+library(tidyverse)
+library(lubridate)
+library(scales)
+library(forcats)
+library(ggExtra)
+library(broom)
+```
+
+### Load data
+
+```{r load-data}
+# load the data
+if (!file.exists("movies.Rdata")) {
+    url <- "https://d3c33hcgiwev3.cloudfront.net/_e1fe0c85abec6f73c72d73926884eaca_movies.Rdata?Expires=1504137600&Signature=SBRZ0CfeUcGItpNcIWTzHkmLQrU3sPGugl7uOUOZbyxze9kBLctsy0HpUj77uuwjr-Up6f58JBU0tX4VYbRc~fFJKbZ-yMM3u5zMpUPV3NX4oRQOyG~mxCv4TGDoVOCctkrtFyu5ToHb6Lw0~rLKq7abUjiMwPgw2WPS5lY770g_&Key-Pair-Id=APKAJLTNE6QMUY6HBC5A"
+    download.file(url, dest = "movies.Rdata", mode = "wb") 
+}
+load("movies.Rdata")
+```
+
+
+* * *
+
+## Part 1: Data
+
+The given data set is comprised of 651 randomly sampled movies produced and released before 2016. The data was obtained from Rotten Tomatoes and IMDB APIs. We do not have any further details on how the random sampling was done, and so we will assume that it is a truly random sample.
+
+We can understand the population this sample represents to be contemporary Hollywood movies. The earliest movie is from 1970 and the most recent is 2014. The histogram below shows the data is left skewed with a mean release year of `r summary(movies$thtr_rel_year)[[3]]`. We do not have any data on the films' country of origin, but they appear to be mostly, if not exclusively, Hollywood productions.
+
+```{r}
+# distribution of theatrical release years
+summary(movies$thtr_rel_year)
+```
+
+We can visualize the distribution of theatrical release years in the histogram below. The median is plotted by the red vertical line.
+
+```{r}
+# histogram of theatrical release years
+ggplot(movies, aes(x = thtr_rel_year)) + 
+    geom_histogram(binwidth = 3) + 
+    geom_vline(xintercept = summary(movies$thtr_rel_year)[[3]], 
+               color = "red") +
+    labs(x = "Theatre Release Year", y = "Frequency") +
+    ggtitle("Year of Theatrical Release for `movies` Dataset")
+```
+
+Because this is an observational study with random sampling rather than an experiment with random assignment, we are not able to infer causality. Random sampling does however allow us to attempt to generalize findings from the sample to the larger population, in this case Hollywood movies.
+
+We do not have any details on how the random sampling was done, and so it is difficult to assess potential biases in the sample. It would also be worth thinking closely about biases in certain variables in the data itself, particularly audience scores in comparison to critic's scores, how they may inherently differ and why.
+
+Given our assignment is to produce a data analysis for Paramount Pictures, it would be wise to consider only the types of titles that Paramount is interested in producing. 
+
+```{r}
+# filter for title type of Paramount titles
+paramount <- movies[grep("Paramount", movies$studio),]
+table(paramount$title_type)
+```
+
+Based on the dataset, it's fair to conclude that Paramount Pictures is only interested in Feature Films. Accordingly, I will remove documentaries and TV movies from consideration. Under this logic, we can also remove the two remaining films rated "NC-17". 
+
+```{r}
+# filter a revised dataset
+films <- filter(movies, title_type == "Feature Film",
+                mpaa_rating != "NC-17")
+```
+
+I'll also take care of a few data cleaning issues here. We can create single date objects for theatrical and DVD release dates instead of having separate columns for year, month and day. It's ok for now that a few fail to parse.
+
+```{r}
+# mutate single theater and dvd release date objects
+films <- films %>%
+    mutate(thtr_rel = ymd(paste(films$thtr_rel_year,
+                                films$thtr_rel_month,
+                                films$thtr_rel_day)),
+           dvd_rel = ymd(paste(films$dvd_rel_year,
+                               films$dvd_rel_month,
+                               films$dvd_rel_day)))
+```
+
+I also want to make `mpaa_rating` an ordered factor for clearer plotting later.
+
+```{r}
+# created ordered factor
+films$mpaa_rating <- factor(films$mpaa_rating, 
+                            levels = c("G", "PG", "PG-13", "R", 
+                                       "Unrated"), 
+                            ordered = TRUE)
+```
+
+I am also going to create a single binary variable to represent any Oscar win or nomination to simplify the five different Oscar categories given.
+
+```{r}
+# create oscar factor variable
+films$oscar <- ifelse(films$best_pic_nom == "yes" |
+                films$best_pic_win == "yes" |
+                films$best_actor_win == "yes" |
+                films$best_actress_win == "yes" |
+                films$best_dir_win == "yes", 1, 0)
+films$oscar <- factor(films$oscar)
+```
+
+Lastly, we have `r nlevels(films$studio)` different levels in the studio variable. But a great many of them are repeats of essentially the same studio. For example, "The Weinstein Company", "Weinstein Company", and "The Weinstein Co." are all counted separately. Grouping these terms into larger categories will help simplify matters.
+
+```{r}
+# define vectors for larger studios
+weinstein <- unique(grep(c("Weinstein"), films$studio, value = TRUE))
+wb <- c("Warner", "WARNER")
+warner <- unique(grep(paste(wb, collapse = "|"), films$studio, value = TRUE))
+sony <- unique(grep(c("Sony"), films$studio, value = TRUE))
+universal <- unique(grep(c("Universal"), films$studio, value = TRUE))
+disney <- unique(grep(c("Disney"), films$studio, value = TRUE))
+paramount <- unique(grep(c("Paramount"), films$studio, value = TRUE))
+fox <- unique(grep(c("Fox"), films$studio, value = TRUE))
+columbia <- unique(grep(c("Columbia"), films$studio, value = TRUE))
+metrog <- c("MGM", "Metro")
+mgm <- unique(grep(paste(metrog, collapse = "|"), films$studio, value = TRUE))
+anchor_bay <- unique(grep(c("Anchor"), films$studio, value = TRUE))
+ifc <- unique(grep(c("IFC"), films$studio, value = TRUE))
+lionsgate <- unique(grep(c("Lions"), films$studio, value = TRUE))
+new_line <- unique(grep(c("New Line"), films$studio, value = TRUE))
+a24 <- unique(grep(c("A24"), films$studio, value = TRUE))
+buena_vista <- unique(grep(c("Buena Vista"), films$studio, value = TRUE))
+miramax <- unique(grep(c("Miramax"), films$studio, value = TRUE))
+orion <- unique(grep(c("Orion"), films$studio, value = TRUE))
+touchstone <- unique(grep(c("Touchstone"), films$studio, value = TRUE))
+dreamworks <- unique(grep(c("Dreamworks"), films$studio, value = TRUE))
+gravitas <- unique(grep(c("Gravitas"), films$studio, value = TRUE))
+magnet <-  unique(grep(c("Magnet"), films$studio, value = TRUE))
+new_world <- unique(grep(c("New World"), films$studio, value = TRUE))
+nordisk <-  unique(grep(c("Nordisk"), films$studio, value = TRUE))
+roadside <-  unique(grep(c("Roadside"), films$studio, value = TRUE))
+samuel <-  unique(grep(c("Samuel"), films$studio, value = TRUE))
+trimark <-  unique(grep(c("Trimark"), films$studio, value = TRUE))
+tristar <-  unique(grep(c("Tristar"), films$studio, value = TRUE))
+
+library(forcats)
+# create new column with grouped factor levels
+films$studio1 <- fct_collapse(films$studio,
+                              Weinstein = weinstein,
+                              Warner = warner,
+                              Sony = sony,
+                              Universal = universal,
+                              Disney = disney,
+                              Paramount = paramount,
+                              Fox = fox,
+                              Columbia = columbia,
+                              MGM = mgm,
+                              Anchor_Bay = anchor_bay,
+                              IFC = ifc,
+                              Lionsgate = lionsgate,
+                              New_Line = new_line,
+                              A24 = a24,
+                              Buena_Vista = buena_vista,
+                              Miramax = miramax,
+                              Orion = orion,
+                              Touchstone = touchstone,
+                              Dreamworks = dreamworks,
+                              Gravitas = gravitas,
+                              Magnet = magnet,
+                              New_World = new_world,
+                              Nordisk = nordisk,
+                              Roadside = roadside,
+                              Samuel_Goldwyn = samuel,
+                              Trimark = trimark,
+                              Tristar = tristar)
+```
+
+We are now down to `r length(unique(films$studio1))` different studios. Of course that is still a lot, but is still more useful, even if not a perfect solution.
+
+* * *
+
+## Part 2: Research question
+
+Our overlords at Paramount would most likely be interested in what factors are associated with higher revenues. Unfortunately, the only revenue data we have is a categorical variable `top200_box`, which tells us if the title made it into the top 200 of the box office. Moreover, only `r round(nrow(films[films$top200_box == "yes",])/nrow(films)*100,2)` percent of our dataset is from the top 200 box office so this might not be that useful.
+
+Rather than create a model to predict a binary categorical variable ("What titles are more likely to be associated with the box office top 200?"), we can instead try to build a model to predict a numeric variable that we might think is positively correlated with box office figures.
+
+Our dataset has three numeric variables for the rating of a film. Two are audience scores from IMDB and Rotten Tomatoes; the third is a critic's score from Rotten Tomatoes.
+
+I am going to make the assumption that the Rotten Tomatoes audience score (`audience_score`) is most closely associated with box office revenue and should be the variable we try to predict in our model. 
+
+I chose an audience score because they are the ones paying to see films, and Rotten Tomatoes because it is the newer ranking and is causing more consternation among studio executives-- even if the data on this is [lacking](https://medium.com/vantage/cognitive-hollywood-part-1-data-shows-box-office-economics-in-turmoil-411a4b22f858).
+
+Accordingly, my research question is:
+*What variables are associated with a higher audience score on Rotten Tomatoes?*
+
+With this question in mind, I will try to construct a model that can predict `audience_score` based upon a number of variables in our dataset in the hopes of understanding what factors make a film more or less popular.
+
+* * *
+
+## Part 3: Exploratory Data Analysis
+
+### Exploratory Questions
+To begin our EDA, we can come up with a number of questions that might frame what influences `audience_score`.
+
+* `imdb_rating` and `critics_score` are two numeric variables where we would expect to see a positive correlation with `audience_score`.
+
+* We would expect a film making it into the `top200_box` office would tend to have high `audience_score`; likewise, for any Oscar wins or nominations. 
+
+`audience_score` could also be affected by variables we might not normally consider to be important.
+
+* Take `genre` for example. Perhaps one type of genre (e.g. comedies) tend to receive higher audience scores.
+
+* Or `runtime`. Perhaps films that are too long or too short tend to be penalized in audience score.
+
+* `mpaa_rating` could also be an important variable. Maybe audience reactions for children's films tend to poll differently than those for films intended for a mature audience.
+
+* As I'm sure Paramount is aware, `studio`, we would think, could also play a role in the popularity of a film as some studios may be better at making popular films than others.
+
+* It might also be important to examine `thtr_rel`. Since we have films dating as far back as 1970, we should be careful about identifying any longitudinal effects. `dvd_rel` is closely related to `thtr_rel`, and so not necessary for consideration.
+
+* Actors and directors also would be expected to contribute heavily to a film's popularity, but for reasons described in the sections below, I have removed them from consideration for possible inclusion in any models.
+
+### Univariate Analysis
+
+I first wanted to look at the distribution of `audience_score` by itself. It appears to be bimodal. It is flat in the sense that most of the distribution's mass is close to the center.
+
+```{r}
+# histogram of audience score
+ggplot(films, aes(x = audience_score)) +
+    geom_histogram(bins = 20) +
+    geom_vline(xintercept = median(films$audience_score), 
+               color = "red") +
+    labs(x = "Audience Score", y = "Frequency", 
+         title = "Audience Score Histogram")
+```
+
+The same trend can be seen if we look at the box and dotplot.
+
+```{r}
+# box+dotplot of audience score
+ggplot(films, aes(x = "audience_score", y = audience_score)) + 
+    geom_boxplot() +
+    theme(axis.text.x = element_blank(),
+          axis.ticks.x = element_blank()) + 
+    geom_dotplot(binaxis = 'y',
+                 stackdir = 'center',
+                 dotsize = 0.5,
+                 fill = 'red',
+                 binwidth = 3) +
+    labs(x = "Count of Films", y = "Audience Score", 
+         title = "Box+Dotplot of Audience Score")
+    
+```
+
+We can also take a look at the summary statistics.
+
+```{r}
+# audience score summary statistics
+films %>%
+    summarize(n = n(),
+              min = min(audience_score),
+              q1 = quantile(audience_score, 0.25),
+              median = median(audience_score),
+              mean = mean(audience_score),
+              q3 = quantile(audience_score, 0.75),
+              max = max(audience_score),
+              sd = sd(audience_score))
+```
+
+### Bivariate Analysis
+
+With a better idea of our variable of interest, we should look to understand how it varies with other variables.
+
+#### Audience Score and IMDB Rating
+
+We can first try the variable we'd most expect to be closely associated with `audience_score`: `imdb_rating`, which is essentially another form of audience-polled rating, only on another platform.
+
+```{r}
+# audience score vs imdb_rating
+g <- ggplot(films, aes(y = audience_score, x = imdb_rating)) +
+    geom_jitter(alpha = 0.5) +
+    geom_vline(xintercept = median(films$imdb_rating), color = "red") +
+    geom_hline(yintercept = median(films$audience_score), color = "blue") +
+    labs(x = "IMDB Rating", y = "Audience Score", 
+         title = "Scatterplot with Median Lines for Audience Score and IMDB Rating")
+g
+```
+
+There definitely appears to be a close relationship. In general, we could describe it as linear, but it does appear to almost have a slight S-shape, curving for low and high scores. This could be perhaps due to difference in scales. Rotten Tomatoes' users apparently can rate movies on a 0-10 scale, whereas IMDB users have a 1-10 scale.
+
+We can place the respective histograms in the margins of our scatterplot to see how the histogram for `audience_score` is much flatter than the one for `imdb_rating`.
+
+```{r}
+ggMarginal(g, type = "histogram")
+```
+
+The scatterplot also makes it easy to see outliers (very good and very bad films). But there's nothing wrong with the data or any reason to remove them.
+```{r}
+outliers <- filter(films, audience_score > 95 | audience_score < 12)
+outliers[,1:4]
+```
+
+
+#### Audience Score and Critic Score
+
+Plotting with `critics_score` as the explanatory variable looks more linear, but with greater spread. We might expect this given that critics and audiences often disagree, but do tend to agree in many cases.
+
+The critic score histogram shows how discerning critics can be. It looks almost entirely flat. This weakens the relationship and adds to the spread.
+
+```{r}
+h <- ggplot(films, aes(y = audience_score, x = critics_score)) +
+    geom_jitter(alpha = 0.5) +
+    geom_vline(xintercept = median(films$critics_score), color = "red") +
+    geom_hline(yintercept = median(films$audience_score), color = "blue") +
+    labs(x = "Critic Score", y = "Audience Score", 
+         title = "Scatterplot with Median Lines for Audience Score and Critic Score")
+
+ggMarginal(h, type = "histogram")
+```
+
+
+#### Audience Score and Top 200 Box Office
+
+Being in the box office top 200 seems to clearly have a positive association with a higher audience score, as we would expect. Laying a dotplot over the boxplot helps to show this relationship. Although we have relatively few samples in the top 200, they do tend to have a higher audience score, whereas films not in the top 200 are found at almost any audience score.
+
+```{r}
+# Box+Dotplot of Audience Score by Top 200 Box Office
+ggplot(films, aes(x = top200_box, y = audience_score)) + 
+    geom_boxplot() +
+    geom_dotplot(binaxis = 'y',
+                 stackdir = 'center',
+                 dotsize = 0.5,
+                 fill = 'red',
+                 binwidth = 3) +
+    labs(x = "Top 200 Box Office", y = "Audience Score", 
+         title = "Box+Dotplot of Audience Score by Top 200 Box Office")
+```
+
+The violin highlights this difference, but it hides the discrepancy in sample size.
+
+```{r}
+# violin plot of audience score by top 200 box office
+ggplot(films, aes(x = top200_box, y = audience_score)) +
+    geom_violin(trim = FALSE) +
+    labs(x = "Top 200 Box Office", y = "Audience Score", 
+         title = "Violin Plot of Audience Score by Top 200 Box Office")
+```
+
+We can also calculate the summary statistics across this dimension.
+
+```{r}
+# audience score by top 200 box office summary stats
+films %>%
+    group_by(top200_box) %>%
+    summarize(n = n(),
+              min = min(audience_score),
+              q1 = quantile(audience_score, 0.25),
+              median = median(audience_score),
+              mean = mean(audience_score),
+              q3 = quantile(audience_score, 0.75),
+              max = max(audience_score),
+              sd = sd(audience_score))
+```
+
+#### Audience Score and Oscar Win/Nomination
+
+Although I grouped the variables for simplicity, Oscar wins and nominations seem to have a positive effect on audience score, but smaller than we might expect. The boxplot shows that films being nominated or winning an Oscar in any of the five categories given raises Q1, Q2, and Q3, but there is still a wide amount of variance.
+
+```{r}
+# Box+Dotplot of Audience Score by Oscar Win/Nom
+ggplot(films, aes(x = oscar, y = audience_score)) +
+    geom_boxplot() +
+    geom_dotplot(binaxis = 'y',
+                 stackdir = 'center',
+                 dotsize = 0.5,
+                 fill = 'red',
+                 binwidth = 3) +
+    labs(x = "Oscar Win/Nomination", y = "Audience Score", 
+         title = "Box+Dotplot of Audience Score by Oscar Win/Nomination")
+```
+
+We can also calculate the summary statistics across this dimension.
+
+```{r}
+# audience score by oscar win/nomination summary stats
+films %>%
+    group_by(oscar) %>%
+    summarize(n = n(),
+              min = min(audience_score),
+              q1 = quantile(audience_score, 0.25),
+              median = median(audience_score),
+              mean = mean(audience_score),
+              q3 = quantile(audience_score, 0.75),
+              max = max(audience_score),
+              sd = sd(audience_score))
+```
+
+#### Audience Score and MPAA Rating
+
+MPAA rating seems to have no real relationship with audience score.
+
+```{r}
+# Box+Dotplot of Audience Score by MPAA Rating
+ggplot(films, aes(x = mpaa_rating, y = audience_score)) + 
+    geom_boxplot() + 
+    geom_dotplot(binaxis = 'y',
+                 stackdir = 'center',
+                 dotsize = 0.2,
+                 fill = 'red',
+                 binwidth = 3) +
+    labs(x = "MPAA Rating", y = "Audience Score", 
+         title = "Box+Dotplot of Audience Score by MPAA Rating") +
+    coord_flip()
+```
+
+We can also calculate the summary statistics across this dimension.
+
+```{r}
+# audience score by MPAA rating summary stats
+films %>%
+    group_by(mpaa_rating) %>%
+    summarize(n = n(),
+              min = min(audience_score),
+              q1 = quantile(audience_score, 0.25),
+              median = median(audience_score),
+              mean = mean(audience_score),
+              q3 = quantile(audience_score, 0.75),
+              max = max(audience_score),
+              sd = sd(audience_score))
+```
+
+#### Audience Score and Genre
+
+Similar to MPAA Rating, genre also seems to have very little relationship with audience score.
+
+```{r}
+# audience score by genre
+ggplot(films, aes(x = genre, y = audience_score)) + 
+    geom_boxplot() + 
+    geom_dotplot(binaxis = 'y',
+                 stackdir = 'center',
+                 dotsize = 0.1,
+                 fill = 'red',
+                 binwidth = 3) +
+    labs(x = "Genre", y = "Audience Score",
+         title = "Box+Dotplot of Audience Score by Genre") +
+    coord_flip()
+```
+
+We can also calculate the summary statistics across this dimension.
+
+```{r}
+# audience score by genre summary stats
+films %>%
+    group_by(genre) %>%
+    summarize(n = n(),
+              min = min(audience_score),
+              q1 = quantile(audience_score, 0.25),
+              median = median(audience_score),
+              mean = mean(audience_score),
+              q3 = quantile(audience_score, 0.75),
+              max = max(audience_score),
+              sd = sd(audience_score))
+```
+
+#### Audience Score and Runtime
+
+We would expect `runtime` to have a very weak association with `audience_score`. This is borne out in the scatterplot. There does not seem to be any audience penalty for a film being too long. In fact, the longest title in the dataset, 'The Godfather, Part II', also has the highest `audience_score`.
+
+```{r}
+# audience score by runtime
+ggplot(films, aes(x = runtime, y = audience_score)) + 
+    geom_point(alpha = 0.5) +
+    labs(x = "Runtime (minutes)", y = "Audience Score", title = "Scatterplot for Audience Score by Runtime")
+```
+
+#### Audience Score and Theatre Release
+
+There is a seasonal aspect to movie-viewing habits. Studios might count on a Christmas-time surge or summer blockbusters. So time of year could also impact audience scores. Or more broadly, scores could go up or down over time depending on audience expectations.
+
+While box office figures likely have seasonal fluctuation, it is difficult to find any such pattern in `audience_score`. The random scatter in the plot below suggests that there is not a longitudinal effect.
+
+```{r}
+# audience score over time
+ggplot(films, aes(x = thtr_rel, y = audience_score)) + 
+    geom_point(alpha = 0.5) +
+    labs(x = "Theatre Release", y = "Audience Score",
+         title = "Scatterplot of Audience Score over Time")
+```
+
+Moreover, the audience rating by month does not seem to have any discernible pattern, looking at the box and dotplot.
+
+```{r}
+# audience score by month
+ggplot(films, aes(x = factor(thtr_rel_month), y = audience_score)) +
+    geom_boxplot() +
+    geom_dotplot(binaxis = 'y',
+                 stackdir = 'center',
+                 dotsize = 0.3,
+                 fill = 'red',
+                 binwidth = 3) +
+    labs(x = "Month of Theatre Release", y = "Audience Score",
+         title = "Audience Score by Month of Theatre Release")
+```
+
+#### Audience Score and Studio
+
+We can easily calculate summary statistics to compare `audience_score` by `studio`.
+
+```{r}
+# audience score by studio summary stats
+films_by_studio <- films %>%
+    group_by(studio1) %>%
+    summarize(n = n(),
+              min = min(audience_score),
+              q1 = quantile(audience_score, 0.25),
+              median = median(audience_score),
+              mean = mean(audience_score),
+              q3 = quantile(audience_score, 0.75),
+              max = max(audience_score),
+              sd = sd(audience_score)) %>%
+    arrange(desc(n))
+films_by_studio
+```
+
+Because we have `r length(unique(films$studio1))` different studios, it is more difficult to visualize them all at once. Instead, we can just plot the most prolific studios and compare their performance. And we don't seem much of a difference. Every big studio has their share of hits and misses.
+
+```{r}
+# find 10 studios with most films produced in dataset
+big_studios <- head(films_by_studio, 10)
+big_studio_df <- filter(films, studio1 %in% big_studios$studio1)
+
+# plot audience score by most prolific studio
+ggplot(big_studio_df, aes(x = studio1, y = audience_score)) +
+    geom_boxplot() +
+    geom_dotplot(binaxis = 'y',
+                 stackdir = 'center',
+                 dotsize = 0.2,
+                 fill = 'red',
+                 binwidth = 3) +
+    labs(y = "Audience Score",
+         title = "Audience Score of Big Studios") +
+    theme(axis.title.y = element_blank()) +
+    coord_flip()
+```
+
+### Multivariate Analysis
+
+Having closely examined all of the possible bivariate relationships, we can now try to visualize the important multivariate relationships.
+
+In the scatterplot below, we see the positive and fairly weak to moderate relationship between `audience_score` and `critics_score`. The blue points for Oscar nominated or winning films seem to fall fairly close in line with this trend. The darker circles representing films in the box office top 200 do however seem to have much higher audience scores on average.
+
+```{r}
+# audience score by critics, oscar, and box office
+ggplot(films, aes(x = critics_score, y = audience_score, 
+                  color = oscar)) +
+    geom_point(alpha = 0.5, size = 2) +
+    geom_point(data = films[films$top200_box == "yes",], 
+               color = "black", size = 3, alpha = 0.5) +
+    labs(x = "Critic Score", y = "Audience Score", 
+         title = "Audience Score by Critic Score",
+         subtitle = "Colored by Oscar Win/Nomination; Box Office Top 200 Highlighted",
+         color = "Oscar Win/Nom")
+```
+
+We can facet out the previous plots by genre to see what effect that might have. The linear trend between `audience_score` and `critics_score` does not appear to be disturbed. It is easier to see, however, that the top 200 box office seems most likely to be either a drama or action/adventure film.
+
+```{r}
+# audience score and critic score by genre
+ggplot(films, aes(x = critics_score, y = audience_score, 
+                  color = oscar)) +
+    geom_point(alpha = 0.5, size = 2) +
+    geom_point(data = films[films$top200_box == "yes",], 
+               color = "black", size = 3, alpha = 0.5) +
+    facet_wrap(~ genre) +
+    labs(x = "Critic Score", y = "Audience Score", 
+         title = "Audience Score and Critic Score by Genre",
+         subtitle = "Colored by Oscar Win/Nomination; Box Office Top 200 Highlighted",
+         color = "Oscar Win/Nom")
+```
+
+We can similarly facet by `mpaa_rating`. Again, the linear trend is strong across ratings. The box office and Oscar results also look well distributed.
+
+```{r}
+# audience score and critics_score by mpaa rating
+ggplot(films, aes(x = critics_score, y = audience_score, 
+                  color = oscar)) +
+    geom_point(alpha = 0.5, size = 2) +
+    geom_point(data = films[films$top200_box == "yes",], 
+               color = "black", size = 3, alpha = 0.5) +
+    facet_wrap(~ mpaa_rating) +
+    labs(x = "Critic Score", y = "Audience Score", 
+         title = "Audience Score and Critic Score by MPAA Rating",
+         subtitle = "Colored by Oscar Win/Nomination; Box Office Top 200 Highlighted",
+         color = "Oscar Win/Nom")
+```
+
+If we substitute `critics_score` with `imdb_rating`, we observe similar trends, but with much less spread. Having a tighter relationship like this is nice, but may not actually be that useful or informative because they are essentially the same measurement (audience popularity) from different sources.
+
+```{r}
+# audience score by imdb, oscar, and box office
+ggplot(films, aes(x = imdb_rating, y = audience_score, 
+                  color = oscar)) +
+    geom_point(alpha = 0.5, size = 2) +
+    geom_point(data = films[films$top200_box == "yes",], 
+               color = "black", size = 3, alpha = 0.5) +
+    labs(x = "IMDB Rating", y = "Audience Score", 
+         title = "Audience Score by IMDB Rating",
+         subtitle = "Colored by Oscar Win/Nomination; Box Office Top 200 Highlighted",
+         color = "Oscar Win/Nom")
+```
+
+
+* * *
+
+## Part 4: Modeling
+
+Our task in the assignment is to construct a multivariable linear regression model using the techniques described in the course. I'll build up to that model by first creating a simple linear regression model, a parallel slopes model, and a simple interaction model.
+
+### Simple Linear Regression Model
+
+Having visually and statistically explored our variables, we can attempt to construct models that help us understand and even hopefully predict `audience_score`.
+
+We saw that `imdb_rating` had a much closer relationship with `audience_score` than `critics_score`. This is reflected in our calculation of the correlation coefficients.
+
+```{r}
+# calculate correlation coefficient
+m1_stats <- films %>%
+    summarize(n = n(),
+              r_imdb = cor(audience_score, imdb_rating),
+              r2_imdb = r_imdb^2,
+              r_crit = cor(audience_score, critics_score),
+              r2_crit = r_crit^2)
+m1_stats
+```
+
+The correlation coefficient of `r_imdb` between `audience_score` and `imdb_rating` is in fact higher than the same coefficient (`r_critic`) between `audience_score` and `critic_score`. However, `imdb_rating` is not very useful to us in this context. It is also an audience-polled popularity measurement. And so, at most we could try to callibrate differences between the two scales, but that might not be useful information for Paramount, which would be more interested in data that could help them predict which films would be more successful.
+
+For instance, if we could predict `audience_score`, within some degree of uncertainty, from `critics_score`, plus a host of categorical variables (genre, rating, runtime, etc.). That would be very useful because a small group of critics could evaluate a movie before a wide release in a way that the general public could not.
+
+```{r}
+# plot a simple linear regression model
+g <- ggplot(films, aes(x = critics_score, y = audience_score)) +
+    geom_point(alpha = 0.5) +
+    labs(x = "Critic Score", y = "Audience Score")
+g + geom_smooth(method = "lm", se = FALSE)
+```
+
+This is the simplest way of letting R create and plot the model for us. We can also direct R in creating the model and then plot the parameters.
+
+```{r}
+# fit simple linear model
+mod1 <- lm(audience_score ~ critics_score, data = films)
+
+# manually fit linear regression line
+g + geom_abline(intercept = coef(mod1)[1], 
+                slope = coef(mod1)[2], color = "red")
+```
+
+If we really want to do things manually, we can also calculate the slope by hand, and we'll see that we get the same result.
+
+```{r}
+# calculate slope by hand
+mod1_stats <- films %>%
+    summarize(r_crit = cor(audience_score, critics_score),
+              sd_crit = sd(critics_score),
+              sd_aud = sd(audience_score),
+              mean_crit = mean(critics_score),
+              mean_aud = mean(audience_score))
+
+r_crit <- mod1_stats[[1,1]]
+sd_crit <- mod1_stats[[1,2]]
+sd_aud <- mod1_stats[[1,3]]
+
+mod1_slope <- (r_crit * (sd_aud/sd_crit))
+mod1_slope
+```
+
+We can interpret the slope of the simple linear regression model accordingly: For each additional point added to critic score, the model predicts audience score will be 0.48 points higher.
+
+Often the intercept is by itself not interesting because it is an extrapolation of the data or does not make sense out of context. However in this case, we do have critic scores close to 0. So our model predicts that a film with a critic score of 0 would have an audience score of `r round(coef(mod1)[[1]],2)`.
+
+One interesting thing we can do with this model is to find the largest residuals. These are the films where the critics and audience disagreed the most.
+
+```{r message=FALSE}
+# turn model into a dataframe
+mod1_df <- augment(mod1)
+
+# find the largest residuals
+big_resid <- mod1_df %>%
+    arrange(desc(.resid)) %>%
+    head(5)
+big_resid[,1:3]
+```
+
+To give the most egregious example, `r dplyr::filter(films, audience_score == 84 & critics_score == 14)$title` received an audience score of 84 but only 14 from the critics. We can highlight the five largest residuals on our plot.
+
+```{r}
+# highlight large residuals
+g + geom_smooth(method = "lm", se = FALSE) +
+    geom_point(data = filter(films, 
+                             audience_score %in% big_resid[[1]] & 
+                                 critics_score %in% big_resid[[2]]),
+                            color = "red")
+```
+
+As these points in particular demonstrate, there is still considerable spread around the regression line. Our correlation coefficient between `audience_score` and `critics_score` was `r round(r_crit, 2)`. This means our r^2 value, which evaluates the strength of the fit of a linear model, is `r round(m1_stats[[5]],2)`. In other words, `r round(m1_stats[[5]]*100,2)` percent of the variability in audience score can be explained by critic score. This is a good start, but we can try to explain more of the variability, and hence improve the model's predictive capability, by adding more variables to the model.
+
+### Parallel Slopes Model
+
+We can improve our simple linear regression model by adding one categorical variable. From our EDA above, the variable `top200_box` seemed to have an important role so let's add it to our previous model. In this case, our response variable remains `audience_score`, but we have two explanatory variables, one numeric (`critics_score`) and one categorical (`top200_box`).
+
+```{r}
+# fit parallel slopes model
+mod2 <- lm(audience_score ~ critics_score + top200_box, data = films)
+summary(mod2)
+```
+
+From the numbers in this table, we can construct the regression lines for both films in the box office top 200 and those outside it. Seeing `top200_boxyes` in the table makes it clear that `no` is the reference level in this model.
+
+Accordingly, we can write the regression line equation for a film in the top 200 box office as:
+
+$$\hat{audiencescore} = 34.07 + 0.48*criticsscore + 4.17 + \epsilon$$
+
+And for a film outside of the box office top 200:
+
+$$\hat{audiencescore} = 34.07 + 0.48*criticsscore + \epsilon$$
+
+According to this parallel slopes model, `r round(coef(mod2)[[1]],2)` is the expected audience score for a film not in the box office top 200 with a critic's score of 0.
+
+Each additional point in critic score is associated with an increase in expected audience score of `r round(coef(mod2)[[2]],2)` points, after controlling for whether the film was in the box office top 200.
+
+We could say that this model's key finding would be that films in the box office top 200 are expected to score `r round(coef(mod2)[[3]],2)` points higher with audiences, after controlling for critic score.
+
+This makes sense because we would expect that films that did well at the box office would score well with audiences, regardless of how critics rated them.
+
+We can plot these two parallel lines onto our data. The blue-green line represents the model's predictions for `audience_score` at each possible `critics_score` given that the film was in the box office top 200. The red line, on the other hand, represents the same prediction for films not in the top 200.
+
+```{r message=FALSE}
+# plot parallel slopes model
+g + geom_line(data = augment(mod2), aes(y = .fitted, 
+                                        color = top200_box))
+```
+
+Compared to our previous r^2 of `r round(summary(mod1)$r.squared,3)`, the r^2 of this model is only slightly better: `r round(summary(mod2)$r.squared,3)`. There are a number of better models we can consider.
+
+### Interaction Model
+
+A downside of the parallel slopes model is that it assumes no interaction between the two chosen explanatory variables, when in reality they likely interact. Critic score and box office results are likely not independent. Critic score often influences box office results because some people weigh critical opinion before buying tickets for a movie. We can fit an interaction model which assumes a dependent relationship between critic score and box office performance.
+
+```{r}
+# fit interaction model
+mod3 <- lm(audience_score ~ critics_score + top200_box + 
+               critics_score:top200_box, data = films)
+summary(mod3)
+```
+
+If we plot this model, we still see a positive relationships between critic score and audience score, regardless of box office results. However, the rate at which the model predicts an increase in`audience_score` for a 1 unit increase in `critics_score` is no longer the same. 
+
+While the parallel slopes model predicted a `r round(coef(mod2)[[3]],2)` point increase in audience score for a film in the top 200 for any given critic score, in this interaction model, that value is not constant.
+
+```{r}
+# plot interaction model
+ggplot(films, aes(x = critics_score, y = audience_score, 
+                  color = top200_box)) +
+    geom_point(alpha = 0.5) +
+    geom_smooth(method = "lm", se = FALSE) +
+    labs(x = "Critic Score", y = "Audience Score")
+```
+
+Still again our r^2 value hasn't moved much. The r^2 of the interaction model is `r round(summary(mod3)$r.squared,4)`, compared to `r round(summary(mod2)$r.squared,4)` for the parallel slopes model and `r round(summary(mod1)$r.squared,4)` for the simple linear regression model. We'll have to try adding more variables.
+
+### Multivariable Linear Regression Model
+
+#### Reasoning for Excluding Certain Variables
+
+Before constructing a multivariable linear regression model, I want to specify why certain variables in the original dataset were not considered for inclusion, even in the "full" model.
+
+1. URLs
+
+`imdb_url` and `rt_url` obviously could have no predictive ability, and so they should be excluded. 
+
+2. Directors and Actors
+ 
+Actors and directors certainly have an impact on the quality and popularity of a film. However, I decided to exclude them from the model for two reasons. The first is that in a sample set of `r nrow(films)`, we have a fairly limited number of titles with the same director or actors. For `r nrow(films)`, we have 477 unique directors. We can see this heavily skewed distribution in a barplot. Most directors appear only once. 
+
+```{r}
+# group and summarize to get counts of unique directors
+films %>%
+    group_by(director) %>%
+    summarize(n = n()) %>%
+    ggplot(aes(x = n)) + 
+    geom_bar() + 
+    labs(x = "Unique Director Appearances", y = "Frequency",
+         title = "Frequency of Director Appearances")
+```
+
+Actors show a similar picture. Even if we sum counts of all five ranks of actors, the most frequent actors appear in a maximum of 8 titles. This could be enough of a sample to discern a trend, but it's not useful for the vast majority of titles.
+
+```{r}
+# create one vector of all actors
+actors <- c(films$actor1, films$actor2, 
+            films$actor3, films$actor4, films$actor5)
+
+# create a df of actors
+actors_df <- as.data.frame(actors)
+
+# summarize counts of actor appearances in dataset
+actors_df_sum <- actors_df %>%
+    group_by(actors) %>%
+    summarize(n = n()) %>%
+    filter(!is.na(actors)) %>%
+    arrange(desc(n))
+head(actors_df_sum, 10)
+```
+
+We can also plot this data to show that most actors in the dataset appear only once, making it difficult to determine the impact of any particular actor on a film.
+
+```{r}
+# plot frequency of actor appearances
+ggplot(actors_df_sum, aes(x = n)) + 
+    geom_bar() + 
+    labs(x = "Number of Appearances by an Actor", y = "Frequency",
+         title = "Frequency of Actor Appearances")
+```
+
+The second reason is that including actors or directors would add hundreds of values of a categorical variable to our model, which is something not properly addressed by the methods introduced in the course.
+
+3. Revised Date Data
+
+Theatrical and DVD release dates were originally each given as three separate variables. These were concatenated into two single objects, and so the previous variables would not be included in the model.
+
+I also dropped `dvd_rel` because it is conditional on `thtr_rel`.
+
+4. `imdb_num_votes`
+
+`imdb_num_votes` and `imdb_rating` are two variables with an interesting relationship. There are a few ways to explain the plot below. On one end, some movies may be historically bad that they encourage people to rate the film. At the higher end of the trend, titles with more ratings tend to be more popular. The relationship looks almost logarithmic. Aside from these two ends, there is a huge mass of titles, close to a mean number of reviews, that could be any rating.     
+
+```{r}
+# plot imdb rating vs number of votes
+ggplot(films, aes(x = imdb_num_votes, y = imdb_rating)) +
+    geom_jitter(alpha = 0.5) +
+    geom_vline(xintercept = median(films$imdb_num_votes), 
+               color = "red") +
+    labs(x = "Number of IMDB Votes", y = "IMDB Rating",
+         title = "IMDB Rating by Number of Votes",
+         subtitle = "Median number of votes in red")
+```
+
+In view of this relationship, it seems reasonable to drop `imdb_num_votes` from the model. What we are really interested in is the rating itself rather than the number of ratings.
+
+5. `critics_rating` and `audience_rating`
+
+`critics_rating` and `audience_rating` are two very important categorical variables, but, in essence, their value is more accruately contained in the numeric variables `critics_score` and `audience_score`. 
+
+You can see this distinction in comparative boxplot for audience scores and rating. The numeric `audience_score` completely determines the categorical variable `audience_rating`.
+
+```{r}
+# plot audience score and audience rating
+ggplot(films, aes(y = audience_score, x = audience_rating)) +
+    geom_boxplot() +
+    geom_dotplot(binaxis = 'y',
+                 stackdir = 'center',
+                 dotsize = 0.4,
+                 fill = 'red',
+                 binwidth = 3) +
+    labs(x = "Audience Rating", y = "Audience Score",
+         title = "Rotten Tomatoes Audience Scores and Rating")
+```
+
+Although the distinction between 'Fresh' and 'Certified Fresh' is more complicated, the same cutting of a numeric variable into a categorical variable is found with critic score, and so I'd prefer to work directly with the numeric variable rather than its bin.
+
+```{r}
+# plot critics score and critic rating
+ggplot(movies, aes(y = critics_score, x = critics_rating)) +
+    geom_boxplot() +
+    geom_dotplot(binaxis = 'y',
+                 stackdir = 'center',
+                 dotsize = 0.4,
+                 fill = 'red',
+                 binwidth = 3) +
+    labs(x = "Critics Rating", y = "Critics Score",
+         title = "Rotten Tomatoes Critic Scores and Rating")
+```
+
+6. `title` and `title_type`
+
+`title_type` had already been removed because Paramount was found only to have made feature films.
+
+7. `studio`
+
+I'll use the grouped `studio1` that I created.
+
+With that explanation, I'll remove those columns from the dataset. I'll also need complete cases for regression. This removes 5 more observations.
+```{r}
+# vector of columns to drop
+drops <- c("title_type","thtr_rel_year", "thtr_rel_month",
+                  "thtr_rel_day", "dvd_rel_year", "dvd_rel_month",
+                  "dvd_rel_day", "imdb_num_votes", "critics_rating", 
+                  "audience_rating", "best_pic_nom", "best_pic_win",
+                  "best_actor_win", "best_actress_win","best_dir_win",
+                  "director", "actor1", "actor2", "actor3", "actor4",
+                  "actor5", "imdb_url", "rt_url", "title","dvd_rel", 
+                  "studio")
+films_mv <- films[ , !(names(films) %in% drops)]
+
+# keep only complete cases
+films_mv <- films_mv[complete.cases(films_mv),]
+```
+
+#### Fit the MLR Model
+
+Mathematically, adding more variables to our model is simple. We just add more terms. Syntactically, it's the same. We just add more variables to the lm() function in R.
+
+Visually however, we cannot really envision the model beyond three variables.
+
+Each time we add an explanatory variable, we will expect r^2 to increase because it should help explain more of the variability. However, for a more honest measure of the model's effectiveness, we should look to adjusted r^2, which introduces a penalty for the addition of extra explanatory variables in relation to the sample size. 
+
+Because we favor parsimonious models, we try to select models with the highest adjusted r^2.
+
+```{r}
+# fit full model
+mod_full <- lm(audience_score ~ genre + runtime + mpaa_rating + 
+                   studio1 + imdb_rating + critics_score + top200_box 
+                   + thtr_rel + oscar, data = films_mv)
+summary(mod_full)
+```
+
+In this model with 9 explanatory variables, our p-value is far less than 0.05 (which we can see with the summary function), so the model as a whole is significant. Therefore, we can reject the null hypothesis that all slope coefficients of our explanatory variables are 0. We know there is at least something interesting to look for amongst these variables. 
+
+However, this F-test doesn't mean the model fits the data well. Rather, we just know that at least one slope coefficient for one variable is non-zero. 
+
+From this full model, I'll employ the backwards elimination method demosntrated in the course to arrive at the most parsimonious model. I'll check the result using both p-value and adjusted r^2 as the decision criteria.
+
+#### Backwards Elimination: p-value
+
+Using the backwards elimination method, with p-value as the decision criteria, I'll remove the explanatory variable with the greatest non-significant p-value from the full model. Then I'll refit the model and again remove the variable with the greatest non-significant p-value. I'll repeat until all remaining variables are significant.
+
+```{r}
+# see p-values for each variable
+expl_var <- c("genre","runtime","mpaa_rating","studio1","imdb_rating",
+              "critics_score","top200_box","thtr_rel","oscar", NA)
+p_values <- anova(mod_full)$'Pr(>F)'
+data.frame(expl_var, p_values)
+```
+
+Surprisingly, `top200_box` was the least significant p-value so I will remove it from the model.
+
+```{r}
+# drop top200_box
+mod1 <- lm(audience_score ~ 
+                   genre +
+                   runtime + 
+                   mpaa_rating + 
+                   studio1 + 
+                   imdb_rating + 
+                   critics_score + 
+                   thtr_rel +
+                   oscar, data = films_mv)
+expl_var <- c("genre","runtime","mpaa_rating","studio","imdb_rating",
+              "critics_score","thtr_rel","oscar", NA)
+p_values <- anova(mod1)$'Pr(>F)'
+data.frame(expl_var, p_values)
+```
+
+The next variable with the greatest non-significant p-value is `oscar`, so it is also removed.
+
+```{r}
+# drop oscar
+mod2 <- lm(audience_score ~ 
+                   genre +
+                   runtime + 
+                   mpaa_rating + 
+                   studio1 + 
+                   imdb_rating + 
+                   critics_score + 
+                   thtr_rel, data = films_mv)
+expl_var <- c("genre","runtime","mpaa_rating","studio","imdb_rating",
+              "critics_score","thtr_rel", NA)
+p_values <- anova(mod2)$'Pr(>F)'
+data.frame(expl_var, p_values)
+```
+
+Next, I'll drop `thtr_rel`.
+
+```{r}
+# drop thtr_rel
+mod3 <- lm(audience_score ~ 
+                   genre +
+                   runtime + 
+                   mpaa_rating + 
+                   studio1 + 
+                   imdb_rating + 
+                   critics_score, data = films_mv)
+expl_var <- c("genre","runtime","mpaa_rating","studio","imdb_rating",
+              "critics_score", NA)
+p_values <- anova(mod3)$'Pr(>F)'
+data.frame(expl_var, p_values)
+```
+
+After having dropped `top200_box`, `oscar`, and `thtr_rel`, all p-values now below 0.05.
+
+```{r}
+# final model for backwards p-value
+mod_pv <- lm(audience_score ~ 
+                   genre +
+                   runtime + 
+                   mpaa_rating + 
+                   studio1 + 
+                   imdb_rating + 
+                   critics_score, data = films_mv)
+```
+
+
+#### Backwards Elimination: adjusted r^2
+
+Now I'll use adjusted r^2 values as the decision criteria, instead of p-values. Using backward selection, I'll start with the full model and remove variables, looking to see whether adjusted r^2 increases each time.
+
+Our full model has an adjusted r^2 of `r round(summary(mod_full)$adj.r.squared,3)` so we need to see if removing variables raises this score.
+
+```{r}
+# initial adjusted r squared
+summary(mod_full)$adj.r.squared
+```
+
+In each of the model scenarios below, I remove one variable.
+
+```{r}
+# step1a: drop genre
+mod_full <- lm(audience_score ~ 
+                   runtime + 
+                   mpaa_rating + 
+                   studio1 + 
+                   imdb_rating + 
+                   critics_score + 
+                   top200_box + 
+                   thtr_rel +
+                   oscar, data = films_mv)
+summary(mod_full)$adj.r.squared
+
+# step1b: drop runtime
+mod_full <- lm(audience_score ~ 
+                   genre +
+                   mpaa_rating + 
+                   studio1 + 
+                   imdb_rating + 
+                   critics_score + 
+                   top200_box + 
+                   thtr_rel +
+                   oscar, data = films_mv)
+summary(mod_full)$adj.r.squared
+
+# step1c: drop mpaa_rating
+mod_full <- lm(audience_score ~ 
+                   genre +
+                   runtime + 
+                   studio1 + 
+                   imdb_rating + 
+                   critics_score + 
+                   top200_box + 
+                   thtr_rel +
+                   oscar, data = films_mv)
+summary(mod_full)$adj.r.squared
+
+# step1d: drop studio
+mod_full <- lm(audience_score ~ 
+                   genre +
+                   runtime + 
+                   mpaa_rating + 
+                   imdb_rating + 
+                   critics_score + 
+                   top200_box + 
+                   thtr_rel +
+                   oscar, data = films_mv)
+summary(mod_full)$adj.r.squared
+
+# step1e: drop imdb_rating
+mod_full <- lm(audience_score ~ 
+                   genre +
+                   runtime + 
+                   mpaa_rating + 
+                   studio1 + 
+                   critics_score + 
+                   top200_box + 
+                   thtr_rel +
+                   oscar, data = films_mv)
+summary(mod_full)$adj.r.squared
+
+# step1f: drop critics_score
+mod_full <- lm(audience_score ~ 
+                   genre +
+                   runtime + 
+                   mpaa_rating + 
+                   studio1 + 
+                   imdb_rating + 
+                   top200_box + 
+                   thtr_rel +
+                   oscar, data = films_mv)
+summary(mod_full)$adj.r.squared
+
+# step1g: drop top200_box
+mod_full <- lm(audience_score ~ 
+                   genre +
+                   runtime + 
+                   mpaa_rating + 
+                   studio1 + 
+                   imdb_rating + 
+                   critics_score + 
+                   thtr_rel +
+                   oscar, data = films_mv)
+summary(mod_full)$adj.r.squared
+
+# step1h: drop thtr_rel
+mod_full <- lm(audience_score ~ 
+                   genre +
+                   runtime + 
+                   mpaa_rating + 
+                   studio1 + 
+                   imdb_rating + 
+                   critics_score + 
+                   top200_box + 
+                   oscar, data = films_mv)
+summary(mod_full)$adj.r.squared
+
+# step1i: drop oscar
+mod_full <- lm(audience_score ~ 
+                   genre +
+                   runtime + 
+                   mpaa_rating + 
+                   studio1 + 
+                   imdb_rating + 
+                   critics_score + 
+                   top200_box + 
+                   thtr_rel, data = films_mv)
+summary(mod_full)$adj.r.squared
+```
+
+The largest adjusted r^2 increase came from dropping `mpaa_rating`. Now having dropped `mpaa_rating` from each scenario, I'll try all possible models dropping another variable.
+
+```{r}
+# step2a: drop genre
+mod_full <- lm(audience_score ~ 
+                   runtime + 
+                   studio1 + 
+                   imdb_rating + 
+                   critics_score + 
+                   top200_box + 
+                   thtr_rel +
+                   oscar, data = films_mv)
+summary(mod_full)$adj.r.squared
+
+# step2b: drop runtime
+mod_full <- lm(audience_score ~ 
+                   genre +
+                   studio1 + 
+                   imdb_rating + 
+                   critics_score + 
+                   top200_box + 
+                   thtr_rel +
+                   oscar, data = films_mv)
+summary(mod_full)$adj.r.squared
+
+# step2c: drop mpaa_rating
+mod_full <- lm(audience_score ~ 
+                   genre +
+                   runtime + 
+                   studio1 + 
+                   imdb_rating + 
+                   critics_score + 
+                   top200_box + 
+                   thtr_rel +
+                   oscar, data = films_mv)
+summary(mod_full)$adj.r.squared
+
+# step2d: drop studio
+mod_full <- lm(audience_score ~ 
+                   genre +
+                   runtime + 
+                   imdb_rating + 
+                   critics_score + 
+                   top200_box + 
+                   thtr_rel +
+                   oscar, data = films_mv)
+summary(mod_full)$adj.r.squared
+
+# step2e: drop imdb_rating
+mod_full <- lm(audience_score ~ 
+                   genre +
+                   runtime + 
+                   studio1 + 
+                   critics_score + 
+                   top200_box + 
+                   thtr_rel +
+                   oscar, data = films_mv)
+summary(mod_full)$adj.r.squared
+
+# step2f: drop critics_score
+mod_full <- lm(audience_score ~ 
+                   genre +
+                   runtime + 
+                   studio1 + 
+                   imdb_rating + 
+                   top200_box + 
+                   thtr_rel +
+                   oscar, data = films_mv)
+summary(mod_full)$adj.r.squared
+
+# step2g: drop top200_box
+mod_full <- lm(audience_score ~ 
+                   genre +
+                   runtime + 
+                   studio1 + 
+                   imdb_rating + 
+                   critics_score + 
+                   thtr_rel +
+                   oscar, data = films_mv)
+summary(mod_full)$adj.r.squared
+
+# step2h: drop thtr_rel
+mod_full <- lm(audience_score ~ 
+                   genre +
+                   runtime + 
+                   studio1 + 
+                   imdb_rating + 
+                   critics_score + 
+                   top200_box + 
+                   oscar, data = films_mv)
+summary(mod_full)$adj.r.squared
+
+# step2i: drop oscar
+mod_full <- lm(audience_score ~ 
+                   genre +
+                   runtime + 
+                   studio1 + 
+                   imdb_rating + 
+                   critics_score + 
+                   top200_box + 
+                   thtr_rel, data = films_mv)
+summary(mod_full)$adj.r.squared
+```
+
+After having dropped `mpaa_rating`, now dropping `top200_box` yielded the highest adjusted r^2 increase. I'll repeat this process again.
+
+```{r}
+# step3a: drop genre
+mod_full <- lm(audience_score ~ 
+                   runtime + 
+                   studio1 + 
+                   imdb_rating + 
+                   critics_score + 
+                   thtr_rel +
+                   oscar, data = films_mv)
+summary(mod_full)$adj.r.squared
+
+# step3b: drop runtime
+mod_full <- lm(audience_score ~ 
+                   genre +
+                   studio1 + 
+                   imdb_rating + 
+                   critics_score + 
+                   thtr_rel +
+                   oscar, data = films_mv)
+summary(mod_full)$adj.r.squared
+
+# step3d: drop studio
+mod_full <- lm(audience_score ~ 
+                   genre +
+                   runtime + 
+                   imdb_rating + 
+                   critics_score + 
+                   thtr_rel +
+                   oscar, data = films_mv)
+summary(mod_full)$adj.r.squared
+
+# step3e: drop imdb_rating
+mod_full <- lm(audience_score ~ 
+                   genre +
+                   runtime + 
+                   studio1 + 
+                   critics_score + 
+                   thtr_rel +
+                   oscar, data = films_mv)
+summary(mod_full)$adj.r.squared
+
+# step3f: drop critics_score
+mod_full <- lm(audience_score ~ 
+                   genre +
+                   runtime + 
+                   studio1 + 
+                   imdb_rating + 
+                   thtr_rel +
+                   oscar, data = films_mv)
+summary(mod_full)$adj.r.squared
+
+# step3h: drop thtr_rel
+mod_full <- lm(audience_score ~ 
+                   genre +
+                   runtime + 
+                   studio1 + 
+                   imdb_rating + 
+                   critics_score + 
+                   oscar, data = films_mv)
+summary(mod_full)$adj.r.squared
+
+# step3i: drop oscar
+mod_full <- lm(audience_score ~ 
+                   genre +
+                   runtime + 
+                   studio1 + 
+                   imdb_rating + 
+                   critics_score + 
+                   thtr_rel, data = films_mv)
+summary(mod_full)$adj.r.squared
+```
+
+No combination increased our previous adjusted r^2 so we are finished.   
+
+#### Comparison and Coefficient Interpretation
+
+To recap, our final models were:
+```{r}
+# final model backwards p-value
+mod_pv <- lm(audience_score ~ 
+                   genre +
+                   runtime + 
+                   mpaa_rating + 
+                   studio1 + 
+                   imdb_rating + 
+                   critics_score, data = films_mv)
+
+# final model backwards adj.r.squared
+mod_ars <- lm(audience_score ~ 
+                   genre +
+                   runtime +
+                   studio1 + 
+                   imdb_rating + 
+                   critics_score + 
+                   thtr_rel +
+                   oscar, data = films_mv)
+```
+
+Our final model using adjusted r^2 as the decision criteria removed `mpaa_rating` and `top200_box`. This is different than our previous result, which removed `top200_box`, `oscar`, and `thtr_rel`.
+
+The adjusted r^2 criteria yieled a higher adjusted r^2 (`r summary(mod_ars)$adj.r.squared`) than that for the p-value criteria (`r summary(mod_pv)$adj.r.squared`).
+
+However, while all variables had significant p-values using the p-value criteria, using the adjusted r^2 criteria, two variables (`thtr_rel` and `oscar`) remain with non-significant p-values.
+
+The coefficients we get from the summary function applied to each model are very similar, and so I'll report them for `mod_ars`.
+
+All else held constant, the model predicts a film's audience score to increase `r round(coef(mod_ars)[['critics_score']],3)` points for every 1 point increase in critic score, or increase `r round(coef(mod_ars)[['imdb_rating']],3)` points for every 1 point increase in imdb_rating, or decrease `r round(abs(coef(mod_ars)[['runtime']]),3)` points for every minute added to runtime.
+
+Some coefficients in this model don't communicate any valuable information. For example, our `thtr_rel` coefficient suggests that for each additional day, audience score should decrease `r round(abs(coef(mod_ars)['thtr_rel']),3)` points (all else held equal). This makes sense, but perhaps suggests including this variable in the model was not the right decision.
+
+The coefficient for `oscar` was surprising. It suggests that, all else held equal, the model predicts an audience score `r round(abs(coef(mod_ars)['oscar1']),3)` points *lower* if it has won or been nominated for an Oscar. Looking back to our EDA, an Oscar win or nomination was a small effect, but it was positive.
+
+These are of course the model's best estimates, but do not take into account the uncertainty around them.
+
+#### Model Diagnostics
+
+There are four conditions for multivariable linear regression models to be valid:
+
+1. We must find a linear relationship between numeric explanatory x variables and the response y variable. We can check this condition with a residuals plot, looking to see random scatter around 0.
+
+```{r}
+# residual plot for numeric variables in mod_pv
+par(mfrow = c(2,2))
+plot(mod_pv$residuals ~ films_mv$critics_score)
+plot(mod_pv$residuals ~ films_mv$imdb_rating)
+plot(mod_pv$residuals ~ films_mv$runtime)
+```
+
+```{r}
+# residual plot for numeric variables in mod_ars
+par(mfrow = c(2,2))
+plot(mod_ars$residuals ~ films_mv$critics_score)
+plot(mod_ars$residuals ~ films_mv$imdb_rating)
+plot(mod_ars$residuals ~ films_mv$runtime)
+plot(mod_ars$residuals ~ films_mv$thtr_rel)
+```
+
+The residuals plots above generally show random scatter around 0 so I think these variables meet the linearity condition.
+
+2. We require nearly normal residuals.
+
+We can check this conditon with a histogram or normal probability plot.
+
+```{r}
+# histograms of mod_pv and mod_ars residuals
+par(mfrow = c(1,2))
+hist(mod_pv$residuals)
+hist(mod_ars$residuals)
+```
+
+The histograms look close to normal.
+
+```{r}
+# qq plots for mod_pv and mod_ars residuals
+par(mfrow = c(1,2))
+qqnorm(mod_pv$residuals)
+qqline(mod_pv$residuals)
+qqnorm(mod_ars$residuals)
+qqline(mod_ars$residuals)
+```
+
+There is definitely deviation at the tails, so we can say this condition is fairly satisfied.
+
+3. We should have constant variability of residuals.
+
+In other words, residuals should be equally variable for low and high values of the predicted response variable.
+
+We can check this condition using residuals plots of residuals vs predicted (e vs y_hat). This allows for considering the entire model (with all explanatory variables) at once. We are hoping to see residuals randomly scattered in a band with a constant width around 0 (no fan shape).
+
+```{r}
+# residuals vs fitted plot
+par(mfrow = c(1,2))
+plot(mod_pv$residuals ~ mod_pv$fitted)
+plot(mod_ars$residuals ~ mod_ars$fitted)
+```
+
+We can also plot the absolute value of residuals, which in effect, folds the plot in above along y = 0.
+```{r}
+# absolute value of residuals vs fitted
+par(mfrow = c(1,2))
+plot(abs(mod_ars$residuals) ~ mod_ars$fitted)
+plot(abs(mod_pv$residuals) ~ mod_pv$fitted)
+```
+
+We do see somewhat of a triangle shape, but overall this condition looks to be satisfied.
+
+4. We require independence of residuals, or in other words independent observations. 
+
+We do not know too much about how the data was sampled, but we are told it is a random sample, and so it is fair to assume that our observations, and thus residuals, are independent.
+
+
+* * *
+
+## Part 5: Prediction
+
+We can use the models to predict the audience score of films not in our dataset. According to the instructions, we've been asked to use a movie from 2016. In a way, this year falls outside of our dataset (1970-2014), but given we saw no linear relationship with time, it should not be too dangerous of an extrapolation.
+
+I gathered data on two 2016 films from Rotten Tomatoes and IMDB: 'Zootopia' and 'Alice Through the Looking Glass'.
+
+```{r}
+# new observations
+zootopia <- data.frame(genre = "Animation",
+                      runtime = 110,
+                      mpaa_rating = "PG",
+                      studio1 = "Disney",
+                      imdb_rating = 8.0,
+                      critics_score = 98,
+                      audience_score = 92,
+                      top200_box = "yes",
+                      thtr_rel = as.Date("2016-03-04"),
+                      oscar = '1')
+
+alice <- data.frame(genre = "Action & Adventure",
+                      runtime = 108,
+                      mpaa_rating = "PG",
+                      studio1 = "Disney",
+                      imdb_rating = 6.2,
+                      critics_score = 30,
+                      audience_score = 49,
+                      top200_box = "yes",
+                      thtr_rel = as.Date("2016-10-18"),
+                      oscar = '0')
+
+```
+
+The predictions of the two models for each film can be found below. The estimates seem accurate, but note that while the model's estimate is quite close to the actual value in these two cases, the models' 95% confidence interval is quite wide.
+
+```{r}
+new_films <- c("Zootopia", "Alice Through the Looking Glass")
+films_added <- rep(new_films, each = 2)
+
+pred <- c(predict(mod_pv, newdata = zootopia, interval="confidence"),
+    predict(mod_ars, newdata = zootopia, interval = "confidence"),
+    predict(mod_pv, newdata = alice, interval = "confidence"),
+    predict(mod_ars, newdata = alice, interval = "confidence"))
+
+predict_df <- data.frame(film = films_added,
+                         model = c("mod_pv", "mod_ars"),
+                         actual = c(92,92,49,49),
+                         fit = pred[c(1,4,7,10)],
+                         lower = pred[c(2,5,8,11)],
+                         upper = pred[c(3,6,9,12)])
+predict_df
+```
+
+For example, Zootopia had an actual audience score of `r zootopia[['audience_score']]`. `mod_ars` predicted a score of `r round(predict(mod_ars, newdata = zootopia),2)`. So this was close, but the 95% confidence interval is from `r round(predict(mod_ars, newdata = zootopia, interval = "confidence")[2],2)` to `r round(predict(mod_ars, newdata = zootopia, interval = "confidence")[3],2)`, which of course is too high for a 100 point scale.
+
+`mod_pv` predicted a score of `r round(predict(mod_pv, newdata = alice),2)` for Alice Through the Looking Glass, compared to its actual `r round(alice[['audience_score']],2)`. The 95% confidence interval is from `r round(predict(mod_pv, newdata = alice, interval = "confidence")[2],2)` to `r round(predict(mod_pv, newdata = alice, interval = "confidence")[3],2)`. 
+
+So in these two cases, both models overestimated the actual value, but `mod_ars` was closer.
+
+* * *
+
+## Part 6: Conclusion
+
+This report set out to shed light upon the research question:
+*What variables are associated with a higher audience score on Rotten Tomatoes?*
+
+EDA demonstrated that the most closely associated variable was a film's IMDB rating. However, this was not particularly insightful given that it is another form of audience-polled popularity. Our models confirmed the importance of this variable. Removing it substantially dropped our r^2 value.
+
+Rotten Tomatoes' critic score was positively associated with audience score, but with much more spread, as expected.
+
+EDA indicated that a film's presence in the box office top 200, and to a lesser degree an Oscar win or nomination, tended to improve a film's audience score. However, the multivariable model arrived at through the backwards elimination method, with p-value as the decision criteria, removed `top200_box` and `oscar` (as well as `thtr_rel`) as non-significant variables. The model setting adjusted r^2 as the decision criteria also removed `top200_box`, as well as `mpaa_rating`. It is hard to fully understand why this happened at this point. 
+
+Our final models reported high adjusted r^2 values (`r round(summary(mod_ars)$adj.r.squared,2)` for `mod_ars`), suggesting that it did a good job of explaining the variability in the data. However, `imdb_rating` seems to be doing a lot of the heavy lifting. This might suggest that film executives are better off doing extensive screen testing with the general public, rather than advance showing for critics.
+
+### Discussion of Shortcomings
+
+Despite the model showing some usefulness, this brief study has a number of shortcomings.
+
+Starting with the data, given the data available on the Rotten Tomatoes and IMDB APIs, I see no reason why the size of the sample could not increase, particularly among films in the box office top 200.
+
+We could also have benefitted from having a numeric box office revenue figure instead of a binary categorical top 200 box office variable. This presumably is available from the APIs.
+
+Particularly if the sample size increases, actor and director data should be included for analysis. Intuitively, we know this somehow makes a difference, and so we should include it.
+
+Rather than using a simplified Oscar award category, we could have used the more detailed format. Other award information should also be available from the APIs.
+
+Future research could also examine the budget of films and how that affects not just audience score but also film revenue.
